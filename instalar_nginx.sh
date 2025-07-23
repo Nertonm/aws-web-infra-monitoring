@@ -6,7 +6,7 @@
 # Uso:          sudo ./instalador_nginx.sh 
 #
 # Autor:        Thiago Nerton Macedo Alves
-# Versão:       1.2
+# Versão:       1.3
 # Dependências: UFW, apt.
 
 
@@ -76,7 +76,7 @@ criar_pagina_teste() {
         <html lang="pt-br">
         <head>
             <meta charset="UTF-8">
-            <title>Olá Mundo com Nginx</title>
+            <title>Olá Mundo com Nginxom Nginx</title>
             <style>
             </style>
         </head>
@@ -102,7 +102,8 @@ finalizar_e_verificar() {
     systemctl status "${NGINX_PACKAGE}" --no-pager || true
 
     local ip_address
-    ip_address=$(hostname -i | awk '{print $1}')
+    #ip_address=$(hostname -i | awk '{print $1}')
+    ip_address=$(ip -4 addr show scope global | grep inet | awk '{print $2}' | cut -d'/' -f1)
     log_success "Instalação concluída!"
     log_info "Acesse http://${ip_address} no seu navegador para testar."
 }
