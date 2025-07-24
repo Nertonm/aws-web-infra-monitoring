@@ -1,11 +1,35 @@
-#!/bin/bash
+#!/bin/env bash
 
-# Health Check do Nginx com Log
-# Verifica o status do serviço Nginx e registra eventos em log estruturado.
-# Uso:          sudo XXXX 
+# Verificador de Status para Serviços Web (padrão: Nginx)
 #
-# Autor:        Thiago Nerton Macedo Alves
-# Versão:       1.1
+# Realiza uma verificação completa de um serviço web, testando:
+#   1. O status do processo via systemd.
+#   2. Se a porta TCP está aberta e em modo de escuta (LISTEN).
+#   3. Se o serviço retorna um código de status HTTP válido (2xx ou 3xx).
+#
+# USO:
+#   sudo ./checking_nginx.sh [OPÇÕES]
+#
+# OPÇÕES:
+#   -s, --service <nome>    Define o serviço a ser verificado no systemd (padrão: nginx).
+#   -h, --host <host>       Host para o teste de conexão HTTP (padrão: localhost).
+#   -p, --port <porta>      Porta para o teste TCP e HTTP (padrão: 80).
+#   -l, --log-file <path>   Caminho do arquivo para registrar a saída (padrão: /var/log/nginx_check.log).
+#       --help              Mostra esta mensagem de ajuda e sai.
+#
+# EXEMPLOS DE USO:
+#   # Verificar o serviço nginx padrão na porta 80
+#   sudo ./checking_nginx.sh
+#
+#   # Verificar o serviço apache2 em uma porta diferente
+#   sudo ./checking_nginx.sh --service apache2 --port 8080
+#
+#   # Salvar o log em um local personalizado
+#   sudo ./checking_nginx.sh -l /tmp/my_check.log
+#
+# -----------------------------------------------------------------------------
+# Autor:    Thiago Nerton Macedo Alves
+# Versão:   2.1
 
 
 set -euo pipefail
@@ -13,20 +37,41 @@ set -euo pipefail
 # -u: Torna variáveis não definidas como um erro.
 # -o pipefail: Numa sequência de pipe a saida vai ser a do último comando com erro.
 
-# Variáveis de Configuração 
-readonly SERVICE_NAME="nginx"
-readonly PORT="80"
-readonly HOST="localhost"
-
-# Localização do arquivo de log. 
-readonly LOG_FILE="/var/log/nginx_check.log"
-
 # Cores do Log
-readonly COLOR_RESET="\e[0m"
-readonly COLOR_GREEN="\e[0;32m"
-readonly COLOR_BLUE="\e[0;34m"
-readonly COLOR_RED="\e[0;31m"
-readonly COLOR_YELLOW="\e[0;33m"
+# Usa cores somente se o terminal suportar
+if [[ -t 1 ]]; then
+    readonly COLOR_RESET="\e[0m"
+    readonly COLOR_GREEN="\e[0;32m"
+    readonly COLOR_BLUE="\e[0;34m"
+    readonly COLOR_RED="\e[0;31m"
+    readonly COLOR_YELLOW="\e[0;33m"
+else
+    readonly COLOR_RESET=""
+    readonly COLOR_GREEN=""
+    readonly COLOR_BLUE=""
+    readonly COLOR_RED=""
+    readonly COLOR_YELLOW=""
+fi
+
+# Valores Padrão (podem ser sobrescritos por argumentos)
+SERVICE_NAME="nginx"
+PORT="80"
+HOST="localhost"
+# Localização do arquivo de log. 
+LOG_FILE="/var/log/nginx_check.log"
+
+usage(){
+    # Extrai a seção de comentários
+    sed -n 's/^# //p; /^set -euo pipefail/q' "$0"
+    exit 0
+}
+
+
+die() {
+  echo "Erro: $1" >&2
+  echo "Use --help para mais informações." >&2
+  exit 1
+}
 
 # Função de logging
 # Argumentos: 1=Nível, 2=Cor, 3=Mensagem
@@ -35,7 +80,7 @@ log() {
     local color="$2"
     local message="$3"
     
-    # Formato para o arquivo de log 
+    # Formato para o arquivo de log (sem cor)
     local log_line
     log_line="[$(date '+%Y-%m-%d %H:%M:%S')] [${level}] ${message}"
     
@@ -53,8 +98,7 @@ log() {
 log_info()    { log "INFO"    "${COLOR_BLUE}"   "$1"; }
 log_success() { log "SUCCESS" "${COLOR_GREEN}"  "$1"; }
 log_warn()    { log "WARN"    "${COLOR_YELLOW}" "$1"; }
-log_error()   { 
-    log "ERROR"   "${COLOR_RED}"    "$1"
+log_error()   { log "ERROR"   "${COLOR_RED}"    "$1"
     # Erros são enviados para stderr para serem capturados por outras ferramentas.
     echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $1" >&2
 }
@@ -62,7 +106,7 @@ log_error()   {
 # Função Principal
 main() {
     # Garante que o arquivo de log existe e o script tem permissão para escrever nele
-    touch "${LOG_FILE}" || { echo "ERRO: Não foi possível criar ou acessar o arquivo de log em ${LOG_FILE}. Execute como Administrador." >&2; exit 1; }
+    touch "${LOG_FILE}" || { echo "ERRO: Não foi possível criar ou acessar o arquivo de log em ${LOG_FILE}. Execute como root." >&2; exit 1; }
     log_info "Iniciando verificação do ${SERVICE_NAME}"
     
     # Nível 1: Status do serviço
@@ -101,5 +145,69 @@ main() {
     log_info "Verificação concluída com sucesso"
 }
 
-# Executa a função principal
+
+# Tratamento de argumentos da linha de comando
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+    -s|--service)
+        # Validação: O segundo argumento existe e não é outra opção
+        if [[ -z "$2" || "$2" =~ ^- ]]; then
+            die "A opção '$1' requer um nome de serviço como argumento."
+        fi
+        SERVICE_NAME="$2"
+        shift 2
+    ;;
+
+    -h|--host)
+        if [[ -z "$2" || "$2" =~ ^- ]]; then
+            die "A opção '$1' requer um host como argumento."
+        fi
+        HOST="$2"
+        shift 2
+    ;;
+
+    -p|--port)
+        if [[ -z "$2" || "$2" =~ ^- ]]; then
+            die "A opção '$1' requer um número de porta como argumento."
+        fi
+      
+      # Validação: Se o argumento é um número inteiro
+        if ! [[ "$2" =~ ^[0-9]+$ ]]; then
+            die "O valor para a porta ('$2') não é um número válido."
+        fi
+
+      # Validação: O número da porta está no intervalo correto (1-65535)
+        if (( $2 < 1 || $2 > 65535 )); then
+            die "A porta '$2' está fora do intervalo válido (1-65535)."
+        fi
+        PORT="$2"
+        shift 2
+    ;;
+
+    -l|--log-file)
+        if [[ -z "$2" || "$2" =~ ^- ]]; then
+            die "A opção '$1' requer um caminho para o arquivo de log."
+        fi
+
+        # Validação: O diretório do arquivo de log existe e temos permissão para escrever nele?
+        log_dir=$(dirname "$2")
+        if ! [[ -d "$log_dir" && -w "$log_dir" ]]; then
+            die "O diretório do arquivo de log ('$log_dir') não existe ou não tem permissão de escrita."
+        fi
+        LOG_FILE="$2"
+        shift 2
+    ;;
+
+    --help)
+        usage
+    ;;
+    
+    *)
+        # Caso Base
+        die "Opção desconhecida '$1'."
+    ;;
+  esac
+done
+
+# Função principal
 main
