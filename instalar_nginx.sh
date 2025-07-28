@@ -12,9 +12,18 @@
 # USO:
 #   sudo ./instalador_nginx.sh
 #
-# -----------------------------------------------------------------------------
+#   Modo Não-Interativo (Automático):
+#     sudo ./instalador_nginx.sh -y
+#
+#   Modo Não-Interativo com Webhooks para Monitoramento:
+#     sudo ./instalador_nginx.sh -y \
+#       --discord-webhook "URL_DISCORD" \
+#       --slack-webhook "URL_SLACK" \
+#       --telegram-token "TOKEN_BOT" \
+#       --telegram-chat-id "CHAT_ID"
+#
 # Autor:           Thiago Nerton Macedo Alves
-# Versão:          3.2
+# Versão:          3.3
 # Compatibilidade: Debian, Ubuntu, RHEL, CentOS, Fedora, Amazon Linux
 # Dependências:    systemd, ufw, e um dos seguintes: (apt | dnf | yum)
 
@@ -23,7 +32,6 @@ set -euo pipefail
 # -u: Trata variáveis não definidas como erro.
 # -o pipefail: faz com que o código de retorno, seja o do último comando que falhou.
 
-# Constantes
 readonly REPO_URL="https://github.com/Nertonm/aws-web-infra-monitoring"
 readonly CLONE_DIR="/opt/aws-web-infra-monitoring"
 
@@ -39,7 +47,11 @@ PKG_MANAGER=""
 AUTO_YES=0
 INSTALL_MONITOR_FLAG=0
 
-# Usa cores somente se o terminal suportar
+DISCORD_WEBHOOK_ARG=""
+SLACK_WEBHOOK_ARG=""
+TELEGRAM_TOKEN_ARG=""
+TELEGRAM_CHAT_ID_ARG=""
+
 if [[ -t 1 ]]; then
     readonly COLOR_RESET="\e[0m"
     readonly COLOR_GREEN="\e[0;32m"
@@ -65,12 +77,9 @@ cleanup() {
         log_error "O script falhou com o código de saída: ${exit_code}"
     fi
 }
-# O comando 'trap' garante que esta função seja chamada ao final ou em caso de erro.
 trap cleanup EXIT
 
-# Funções Principais
 verificar_root() {
-    # $(id -u): retorna o ID numérico do usuário atual. O usuário root sempre tem o ID 0.
     if [[ "$(id -u)" -ne 0 ]]; then
         log_error "Este script precisa ser executado como root. Use 'sudo $0'"
         exit 1
@@ -81,23 +90,57 @@ configurar_webhooks() {
     log_info "Configurando credenciais de notificação..."
     mkdir -p "${MONITOR_CONFIG_DIR}"
     
-    # Limpa o arquivo de configuração antigo se existir
     > "${MONITOR_CONFIG_FILE}"
 
-    read -p "  -> URL do Webhook do Discord (deixe em branco para pular): " DISCORD_WEBHOOK_URL
-    read -p "  -> URL do Webhook do Slack (deixe em branco para pular): " SLACK_WEBHOOK_URL
-    read -p "  -> Token do Bot do Telegram (deixe em branco para pular): " TELEGRAM_BOT_TOKEN
-    
-    if [[ -n "${TELEGRAM_BOT_TOKEN}" ]]; then
-        while [[ -z "${TELEGRAM_CHAT_ID-}" ]]; do
-            read -p "  -> Chat ID do Telegram (obrigatório): " TELEGRAM_CHAT_ID
-            if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
-                log_warn "O Chat ID do Telegram é obrigatório quando o token é fornecido."
-            fi
-        done
+    local DISCORD_WEBHOOK_URL=""
+    local SLACK_WEBHOOK_URL=""
+    local TELEGRAM_BOT_TOKEN=""
+    local TELEGRAM_CHAT_ID=""
+
+    if [[ -n "${DISCORD_WEBHOOK_ARG}" ]]; then
+        DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_ARG}"
+        log_info "  -> Usando URL do Discord fornecida por parâmetro."
+    elif [[ ${AUTO_YES} -eq 0 ]]; then
+        read -p "  -> URL do Webhook do Discord (deixe em branco para pular): " DISCORD_WEBHOOK_URL
     fi
 
-    # Salva as variáveis no arquivo de configuração
+    if [[ -n "${SLACK_WEBHOOK_ARG}" ]]; then
+        SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_ARG}"
+        log_info "  -> Usando URL do Slack fornecida por parâmetro."
+    elif [[ ${AUTO_YES} -eq 0 ]]; then
+        read -p "  -> URL do Webhook do Slack (deixe em branco para pular): " SLACK_WEBHOOK_URL
+    fi
+    
+    if [[ -n "${TELEGRAM_TOKEN_ARG}" ]]; then
+        TELEGRAM_BOT_TOKEN="${TELEGRAM_TOKEN_ARG}"
+        log_info "  -> Usando Token do Telegram fornecido por parâmetro."
+        
+        if [[ -n "${TELEGRAM_CHAT_ID_ARG}" ]]; then
+            TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID_ARG}"
+            log_info "  -> Usando Chat ID do Telegram fornecido por parâmetro."
+        elif [[ ${AUTO_YES} -eq 0 ]]; then
+            while [[ -z "${TELEGRAM_CHAT_ID-}" ]]; do
+                read -p "  -> Chat ID do Telegram (obrigatório): " TELEGRAM_CHAT_ID
+                if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
+                    log_warn "O Chat ID do Telegram é obrigatório quando o token é fornecido."
+                fi
+            done
+        else #
+            log_error "O parâmetro '--telegram-chat-id' é obrigatório quando '--telegram-token' é usado no modo não-interativo."
+            exit 1
+        fi
+    elif [[ ${AUTO_YES} -eq 0 ]]; then 
+        read -p "  -> Token do Bot do Telegram (deixe em branco para pular): " TELEGRAM_BOT_TOKEN
+        if [[ -n "${TELEGRAM_BOT_TOKEN}" ]]; then
+            while [[ -z "${TELEGRAM_CHAT_ID-}" ]]; do
+                read -p "  -> Chat ID do Telegram (obrigatório): " TELEGRAM_CHAT_ID
+                if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
+                    log_warn "O Chat ID do Telegram é obrigatório quando o token é fornecido."
+                fi
+            done
+        fi
+    fi
+
     echo "DISCORD_WEBHOOK_URL='${DISCORD_WEBHOOK_URL}'" >> "${MONITOR_CONFIG_FILE}"
     echo "SLACK_WEBHOOK_URL='${SLACK_WEBHOOK_URL}'" >> "${MONITOR_CONFIG_FILE}"
     echo "TELEGRAM_BOT_TOKEN='${TELEGRAM_BOT_TOKEN}'" >> "${MONITOR_CONFIG_FILE}"
@@ -109,14 +152,13 @@ configurar_webhooks() {
 
 
 clonar_repositorio() {
-    # 1. Verifica se o comando 'git' está disponível.
     if ! command -v git &>/dev/null; then
         log_error "O comando 'git' é necessário, mas não foi encontrado."
         log_info "Por favor, instale o git (ex: sudo apt install git) e execute novamente."
         exit 1
     fi
 
-    local CLONE_NECESSARIO=0 # Flag para controlar se a clonagem é necessária.
+    local CLONE_NECESSARIO=0 
 
     if [[ ! -d "${CLONE_DIR}" ]]; then
         CLONE_NECESSARIO=1
@@ -217,7 +259,7 @@ instalar_monitor() {
     configurar_webhooks
     clonar_repositorio
 
-    local ESCOLHA="1" # Padrão para systemd
+    local ESCOLHA="1" 
     if [[ ${AUTO_YES} -eq 0 ]]; then
         read -p "Como deseja executar o monitor? [1] systemd (recomendado), [2] cron: " -r ESCOLHA
     fi
@@ -412,8 +454,29 @@ main() {
                 INSTALL_MONITOR_FLAG=1
                 shift
                 ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            --discord-webhook)
+                DISCORD_WEBHOOK_ARG="${2-}"
+                shift 2
+                ;;
+            --slack-webhook)
+                SLACK_WEBHOOK_ARG="${2-}"
+                shift 2
+                ;;
+            --telegram-token)
+                TELEGRAM_TOKEN_ARG="${2-}"
+                shift 2
+                ;;
+            --telegram-chat-id)
+                TELEGRAM_CHAT_ID_ARG="${2-}"
+                shift 2
+                ;;
             *)
                 log_error "Opção desconhecida: $1"
+                print_usage
                 exit 1
                 ;;
         esac
