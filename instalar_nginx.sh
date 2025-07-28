@@ -164,8 +164,21 @@ clonar_repositorio() {
         CLONE_NECESSARIO=1
     else
         log_warn "O diretório de destino '${CLONE_DIR}' já existe."
-        log_info "Usando os arquivos existentes. A clonagem será pulada."
-        CLONE_NECESSARIO=0 
+        if [[ ${AUTO_YES} -eq 1 ]]; then
+            log_info "Modo automático: Removendo o diretório para um clone limpo."
+            rm -rf "${CLONE_DIR}"
+            CLONE_NECESSARIO=1
+        else
+            read -p "Deseja remover e clonar novamente? (s/N): " -r RESPOSTA
+            if [[ "$RESPOSTA" =~ ^[sS]$ ]]; then
+                log_info "Removendo diretório existente."
+                rm -rf "${CLONE_DIR}"
+                CLONE_NECESSARIO=1
+            else
+                log_info "Usando a versão existente no diretório. A clonagem será pulada."
+                CLONE_NECESSARIO=0
+            fi
+        fi
     fi
 
     if [[ ${CLONE_NECESSARIO} -eq 1 ]]; then
