@@ -7,13 +7,14 @@
 #   3. Habilitação e configuração do firewall UFW para permitir tráfego HTTP.
 #   4. Criação de uma página de teste, com backup da página original.
 #   5. Habilitação, inicialização e verificação do serviço Nginx via systemd.
+#   6. Configuração para reinicialização automática caso o serviço pare.
 #
 # USO:
 #   sudo ./instalador_nginx.sh
 #
 # -----------------------------------------------------------------------------
 # Autor:           Thiago Nerton Macedo Alves
-# Versão:          2.0
+# Versão:          3.2
 # Compatibilidade: Debian, Ubuntu, RHEL, CentOS, Fedora, Amazon Linux
 # Dependências:    systemd, ufw, e um dos seguintes: (apt | dnf | yum)
 
@@ -23,9 +24,20 @@ set -euo pipefail
 # -o pipefail: faz com que o código de retorno, seja o do último comando que falhou.
 
 # Constantes
+readonly REPO_URL="https://github.com/Nertonm/aws-web-infra-monitoring"
+readonly CLONE_DIR="/opt/aws-web-infra-monitoring"
+
+readonly MONITOR_SCRIPT_NAME="service_status_check.sh" 
+readonly MONITOR_SCRIPT_PATH="/usr/local/bin/service_status_check.sh"
+readonly MONITOR_CONFIG_DIR="/etc/service_monitor"
+readonly MONITOR_CONFIG_FILE="${MONITOR_CONFIG_DIR}/config.env"
+readonly MONITOR_SERVICE_FILE="/etc/systemd/system/monitor-nginx.service"
+
 readonly NGINX_PACKAGE="nginx"
 NGINX_ROOT_DIR=""
 PKG_MANAGER=""
+AUTO_YES=0
+INSTALL_MONITOR_FLAG=0
 
 # Usa cores somente se o terminal suportar
 if [[ -t 1 ]]; then
@@ -33,16 +45,19 @@ if [[ -t 1 ]]; then
     readonly COLOR_GREEN="\e[0;32m"
     readonly COLOR_BLUE="\e[0;34m"
     readonly COLOR_RED="\e[0;31m"
+    readonly COLOR_YELLOW="\e[0;33m"
 else
     readonly COLOR_RESET=""
     readonly COLOR_GREEN=""
     readonly COLOR_BLUE=""
     readonly COLOR_RED=""
+    readonly COLOR_YELLOW=""
 fi
 
 log_info() { echo -e "${COLOR_BLUE}[INFO]${COLOR_RESET} $1";}
 log_success() { echo -e "${COLOR_GREEN}[SUCESSO]${COLOR_RESET} $1";}
 log_error() { echo -e "${COLOR_RED}[ERRO]${COLOR_RESET} $1" >&2;}
+log_warn() { echo -e "${COLOR_YELLOW}[AVISO]${COLOR_RESET} $1";}
 
 cleanup() {
     local exit_code=$?
@@ -62,9 +77,160 @@ verificar_root() {
     fi
 }
 
+configurar_webhooks() {
+    log_info "Configurando credenciais de notificação..."
+    mkdir -p "${MONITOR_CONFIG_DIR}"
+    
+    # Limpa o arquivo de configuração antigo se existir
+    > "${MONITOR_CONFIG_FILE}"
+
+    read -p "  -> URL do Webhook do Discord (deixe em branco para pular): " DISCORD_WEBHOOK_URL
+    read -p "  -> URL do Webhook do Slack (deixe em branco para pular): " SLACK_WEBHOOK_URL
+    read -p "  -> Token do Bot do Telegram (deixe em branco para pular): " TELEGRAM_BOT_TOKEN
+    
+    if [[ -n "${TELEGRAM_BOT_TOKEN}" ]]; then
+        while [[ -z "${TELEGRAM_CHAT_ID-}" ]]; do
+            read -p "  -> Chat ID do Telegram (obrigatório): " TELEGRAM_CHAT_ID
+            if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
+                log_warn "O Chat ID do Telegram é obrigatório quando o token é fornecido."
+            fi
+        done
+    fi
+
+    # Salva as variáveis no arquivo de configuração
+    echo "DISCORD_WEBHOOK_URL='${DISCORD_WEBHOOK_URL}'" >> "${MONITOR_CONFIG_FILE}"
+    echo "SLACK_WEBHOOK_URL='${SLACK_WEBHOOK_URL}'" >> "${MONITOR_CONFIG_FILE}"
+    echo "TELEGRAM_BOT_TOKEN='${TELEGRAM_BOT_TOKEN}'" >> "${MONITOR_CONFIG_FILE}"
+    echo "TELEGRAM_CHAT_ID='${TELEGRAM_CHAT_ID:-}'" >> "${MONITOR_CONFIG_FILE}"
+
+    chmod 600 "${MONITOR_CONFIG_FILE}"
+    log_success "Credenciais salvas em ${MONITOR_CONFIG_FILE}"
+}
+
+
+clonar_repositorio() {
+    # 1. Verifica se o comando 'git' está disponível.
+    if ! command -v git &>/dev/null; then
+        log_error "O comando 'git' é necessário, mas não foi encontrado."
+        log_info "Por favor, instale o git (ex: sudo apt install git) e execute novamente."
+        exit 1
+    fi
+
+    local CLONE_NECESSARIO=0 # Flag para controlar se a clonagem é necessária.
+
+    if [[ ! -d "${CLONE_DIR}" ]]; then
+        CLONE_NECESSARIO=1
+    else
+        log_warn "O diretório de destino '${CLONE_DIR}' já existe."
+        if [[ ${AUTO_YES} -eq 1 ]]; then
+            log_info "Modo automático: Removendo o diretório para um clone limpo."
+            rm -rf "${CLONE_DIR}"
+            CLONE_NECESSARIO=1
+        else
+            read -p "Deseja remover e clonar novamente? (s/N): " -r RESPOSTA
+            if [[ "$RESPOSTA" =~ ^[sS]$ ]]; then
+                log_info "Removendo diretório existente."
+                rm -rf "${CLONE_DIR}"
+                CLONE_NECESSARIO=1
+            else
+                log_info "Usando a versão existente no diretório. A clonagem será pulada."
+                CLONE_NECESSARIO=0
+            fi
+        fi
+    fi
+
+    if [[ ${CLONE_NECESSARIO} -eq 1 ]]; then
+        log_info "Clonando repositório de ${REPO_URL}..."
+        if ! git clone --depth 1 "${REPO_URL}" "${CLONE_DIR}"; then
+            log_error "O comando 'git clone' falhou."
+            log_error "Verifique sua conexão com a internet e se a URL do repositório está correta."
+            exit 1
+        fi
+    fi
+    
+    local SCRIPT_ORIGEM="${CLONE_DIR}/${MONITOR_SCRIPT_NAME}"
+    if [[ ! -f "${SCRIPT_ORIGEM}" ]]; then
+        log_error "O script esperado '${MONITOR_SCRIPT_NAME}' não foi encontrado em '${CLONE_DIR}'."
+        log_error "A clonagem pode ter falhado ou o repositório não contém o arquivo."
+        exit 1
+    fi
+    
+    log_info "Instalando '${MONITOR_SCRIPT_NAME}' em '${MONITOR_SCRIPT_PATH}'..."
+    if ! cp "${SCRIPT_ORIGEM}" "${MONITOR_SCRIPT_PATH}"; then
+        log_error "Falha ao copiar o script para '${MONITOR_SCRIPT_PATH}'. Verifique as permissões."
+        exit 1
+    fi
+
+    if ! chmod +x "${MONITOR_SCRIPT_PATH}"; then
+         log_error "Falha ao tornar o script executável em '${MONITOR_SCRIPT_PATH}'. Verifique as permissões."
+         exit 1
+    fi
+    
+    log_success "Script de monitoramento instalado com sucesso."
+}
+
+instalar_monitor_systemd() {
+    log_info "Configurando o monitor como um serviço systemd..."
+    cat <<EOF > "${MONITOR_SERVICE_FILE}"
+[Unit]
+Description=Monitor de Serviço Nginx (clonado de Git)
+After=nginx.service
+
+[Service]
+ExecStart=${MONITOR_SCRIPT_PATH} -c -i 60 -s nginx
+User=root
+Restart=always
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    local service_name
+service_name=$(basename "${MONITOR_SERVICE_FILE}")
+
+
+    systemctl daemon-reload
+    systemctl enable "${service_name}" --now >/dev/null
+    log_success "Serviço de monitoramento '${service_name}' habilitado e iniciado."
+    log_info "Use 'systemctl status ${service_name}' para ver o status."
+}
+
+instalar_monitor_cron() {
+    log_info "Configurando o monitor via cron @reboot..."
+
+    (crontab -l 2>/dev/null | grep -vF "${MONITOR_SCRIPT_PATH}" || true ; echo "* * * * * ${MONITOR_SCRIPT_PATH} &>> /var/log/monitor_nginx.log") | crontab -
+
+    log_success "Tarefa cron configurada. O monitor será executado a cada minuto."
+    log_warn "Logs serão gravados em /var/log/monitor_nginx.log. Considere configurar a rotação de logs."
+}
+
+instalar_monitor() {
+    if [[ ${INSTALL_MONITOR_FLAG} -eq 0 && ${AUTO_YES} -eq 0 ]]; then
+        read -p "Deseja instalar o script de monitoramento via Git? (s/N): " -r RESPOSTA
+        if [[ ! "$RESPOSTA" =~ ^[sS]$ ]]; then
+            log_info "Instalação do monitor pulada."; return;
+        fi
+    elif [[ ${INSTALL_MONITOR_FLAG} -eq 0 ]]; then
+        return 
+    fi
+    
+    configurar_webhooks
+    clonar_repositorio
+
+    local ESCOLHA="1" # Padrão para systemd
+    if [[ ${AUTO_YES} -eq 0 ]]; then
+        read -p "Como deseja executar o monitor? [1] systemd (recomendado), [2] cron: " -r ESCOLHA
+    fi
+
+    case "${ESCOLHA}" in
+        1) instalar_monitor_systemd;;
+        2) instalar_monitor_cron;;
+        *) log_warn "Opção inválida. Pulando configuração de inicialização automática.";;
+    esac
+}
+
 confirmar_execucao() {
-    # Se o primeiro argumento for -y ou --yes, pula a confirmação
-    if [[ "${1-}" == "-y" || "${1-}" == "--yes" ]]; then
+    if [[ ${AUTO_YES} -eq 1 ]]; then
         return 0
     fi
 
@@ -73,7 +239,8 @@ confirmar_execucao() {
     echo "  2. Configurar o firewall (UFW ou firewalld) para permitir tráfego HTTP."
     echo "  3. Criar uma página de teste no diretório padrão do Nginx (${NGINX_ROOT_DIR})."
     echo "  4. Habilitar e iniciar o serviço Nginx."
-    
+    echo "  5. Configuração para reinicialização automática caso o serviço pare."
+
     read -p "Você deseja continuar? (s/N): " -r RESPOSTA
     if [[ ! "$RESPOSTA" =~ ^[sS]$ ]]; then
         log_info "Operação cancelada pelo usuário."
@@ -115,6 +282,7 @@ detectar_distro_e_configurar() {
 }
 
 instalar_pacotes() {
+
     log_info "Verificando se o Nginx já está instalado..."
     if ( [[ "$PKG_MANAGER" == "apt-get" ]] && dpkg -s "${NGINX_PACKAGE}" &>/dev/null ) || \
        ( [[ "$PKG_MANAGER" != "apt-get" ]] && rpm -q "${NGINX_PACKAGE}" &>/dev/null ); then
@@ -122,14 +290,14 @@ instalar_pacotes() {
         return 0
     fi
 
-    log_info "Instalando o pacote '${NGINX_PACKAGE}' com '${PKG_MANAGER}'..."
+    log_info "Instalando o pacotes '${NGINX_PACKAGE}', git, curl e iproute2 com '${PKG_MANAGER}'..."
     if [[ "$PKG_MANAGER" == "apt-get" ]]; then
         apt-get update -qq
-        apt-get install -y -qq "${NGINX_PACKAGE}"
+        apt-get install -y -qq "${NGINX_PACKAGE}" git curl iproute2
     else
-        "$PKG_MANAGER" install -y "${NGINX_PACKAGE}"
+        "$PKG_MANAGER" install -y "${NGINX_PACKAGE}" git curl iproute2
     fi
-    log_success "Nginx instalado com sucesso."
+    log_success "Nginx, Git, Curl e iproute2 instalados com sucesso."
 }
 
 
@@ -137,6 +305,8 @@ configurar_firewall() {
     log_info "Configurando o firewall..."
     if command -v ufw &>/dev/null; then
         log_info "Firewall UFW detectado."
+        log_info "Verificando e permitindo tráfego na porta padrão do SSH (22/tcp)..."
+        ufw allow 22/tcp
         if ! ufw status | grep -q "Status: active"; then
             log_info "Ativando o UFW..."
             ufw --force enable
@@ -206,21 +376,56 @@ finalizar_e_verificar() {
     fi
 
     local ip_address
-    #ip_address=$(hostname -i | awk '{print $1}')
-    ip_address=$(ip -4 addr show scope global | grep inet | awk '{print $2}' | cut -d'/' -f1)
+    ip_address=$(ip -4 addr show scope global | grep inet | awk '{print $2}' | cut -d'/' -f1 | head -n 1)
     log_success "Instalação concluída!"
     log_info "Acesse http://${ip_address} no seu navegador para testar."
 }
 
+configurar_restart(){
+    log_info "Configurando o serviço Nginx para reiniciar automaticamente"
+    OVERRIDE_DIR="/etc/systemd/system/nginx.service.d"
+    OVERRIDE_FILE="$OVERRIDE_DIR/override.conf"
+    log_info "Criando o diretório de override: $OVERRIDE_DIR"
+mkdir -p "$OVERRIDE_DIR"
+    cat <<EOF > "${OVERRIDE_FILE}"
+[Service]
+Restart=on-failure
+RestartSec=5s
+EOF
 
-# Função principal.
+    log_info "Recarregando a configuração do systemd..."
+    systemctl daemon-reload
+    log_success "Configuração de reinício automático aplicada."
+}
+
 main() {
     verificar_root
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -y|--yes)
+                AUTO_YES=1
+                INSTALL_MONITOR_FLAG=1
+                shift
+                ;;
+            --install-monitor)
+                INSTALL_MONITOR_FLAG=1
+                shift
+                ;;
+            *)
+                log_error "Opção desconhecida: $1"
+                exit 1
+                ;;
+        esac
+    done
+
     detectar_distro_e_configurar
-    confirmar_execucao "$@" 
+    confirmar_execucao
     instalar_pacotes
     configurar_firewall
     criar_pagina_teste
+    configurar_restart
+    instalar_monitor
     finalizar_e_verificar
 }
 
