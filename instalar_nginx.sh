@@ -32,6 +32,7 @@ set -euo pipefail
 # -u: Trata variáveis não definidas como erro.
 # -o pipefail: faz com que o código de retorno, seja o do último comando que falhou.
 
+# Variáveis que não mudam
 readonly REPO_URL="https://github.com/Nertonm/aws-web-infra-monitoring"
 readonly CLONE_DIR="/opt/aws-web-infra-monitoring"
 
@@ -42,6 +43,8 @@ readonly MONITOR_CONFIG_FILE="${MONITOR_CONFIG_DIR}/config.env"
 readonly MONITOR_SERVICE_FILE="/etc/systemd/system/monitor-nginx.service"
 
 readonly NGINX_PACKAGE="nginx"
+
+# Variáveis que mudam
 NGINX_ROOT_DIR=""
 PKG_MANAGER=""
 AUTO_YES=0
@@ -52,6 +55,8 @@ SLACK_WEBHOOK_ARG=""
 TELEGRAM_TOKEN_ARG=""
 TELEGRAM_CHAT_ID_ARG=""
 
+
+# O if -t 1 verifica se o stdout é um terminal, não tem sentindo ter cores quando é um log ou pipe.
 if [[ -t 1 ]]; then
     readonly COLOR_RESET="\e[0m"
     readonly COLOR_GREEN="\e[0;32m"
@@ -71,25 +76,31 @@ log_success() { echo -e "${COLOR_GREEN}[SUCESSO]${COLOR_RESET} $1";}
 log_error() { echo -e "${COLOR_RED}[ERRO]${COLOR_RESET} $1" >&2;}
 log_warn() { echo -e "${COLOR_YELLOW}[AVISO]${COLOR_RESET} $1";}
 
+# Essa função executa sempre quando o script terminar.
 cleanup() {
     local exit_code=$?
+    # Exibe a mensagem de erro antes do script fechar.
     if [[ ${exit_code} -ne 0 ]]; then
         log_error "O script falhou com o código de saída: ${exit_code}"
     fi
 }
 trap cleanup EXIT
 
+
 verificar_root() {
+    # O id do root é sempre 0.
     if [[ "$(id -u)" -ne 0 ]]; then
-        log_error "Este script precisa ser executado como root. Use 'sudo $0'"
+        log_error "Este script precisa ser executado como root."
         exit 1
     fi
 }
 
 configurar_webhooks() {
     log_info "Configurando credenciais de notificação..."
+    # Cria outras pastas se precisa
     mkdir -p "${MONITOR_CONFIG_DIR}"
     
+    # Limpa o arquivo antes de escrever novas informações
     > "${MONITOR_CONFIG_FILE}"
 
     local DISCORD_WEBHOOK_URL=""
@@ -100,6 +111,7 @@ configurar_webhooks() {
     if [[ -n "${DISCORD_WEBHOOK_ARG}" ]]; then
         DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_ARG}"
         log_info "  -> Usando URL do Discord fornecida por parâmetro."
+    # Caso iterativo
     elif [[ ${AUTO_YES} -eq 0 ]]; then
         read -p "  -> URL do Webhook do Discord (deixe em branco para pular): " DISCORD_WEBHOOK_URL
     fi
@@ -119,13 +131,15 @@ configurar_webhooks() {
             TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID_ARG}"
             log_info "  -> Usando Chat ID do Telegram fornecido por parâmetro."
         elif [[ ${AUTO_YES} -eq 0 ]]; then
+            # Como foi definido no inicio que qualquer erro para a execução e que variaveis sem valor são um erro grave
+            # O - em "${TELEGRAM_CHAT_ID-}" é para evitar que a variável não definida cause um erro.
             while [[ -z "${TELEGRAM_CHAT_ID-}" ]]; do
                 read -p "  -> Chat ID do Telegram (obrigatório): " TELEGRAM_CHAT_ID
                 if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
                     log_warn "O Chat ID do Telegram é obrigatório quando o token é fornecido."
                 fi
             done
-        else #
+        else 
             log_error "O parâmetro '--telegram-chat-id' é obrigatório quando '--telegram-token' é usado no modo não-interativo."
             exit 1
         fi
@@ -146,12 +160,14 @@ configurar_webhooks() {
     echo "TELEGRAM_BOT_TOKEN='${TELEGRAM_BOT_TOKEN}'" >> "${MONITOR_CONFIG_FILE}"
     echo "TELEGRAM_CHAT_ID='${TELEGRAM_CHAT_ID:-}'" >> "${MONITOR_CONFIG_FILE}"
 
+    # Apenas o root pode ler e escrever
     chmod 600 "${MONITOR_CONFIG_FILE}"
     log_success "Credenciais salvas em ${MONITOR_CONFIG_FILE}"
 }
 
 
 clonar_repositorio() {
+    # Verifica se o git está instalado
     if ! command -v git &>/dev/null; then
         log_error "O comando 'git' é necessário, mas não foi encontrado."
         log_info "Por favor, instale o git (ex: sudo apt install git) e execute novamente."
@@ -160,6 +176,7 @@ clonar_repositorio() {
 
     local CLONE_NECESSARIO=0 
 
+    # Verifica se o diretório de clonagem já existe
     if [[ ! -d "${CLONE_DIR}" ]]; then
         CLONE_NECESSARIO=1
     else
@@ -228,8 +245,7 @@ RestartSec=30s
 WantedBy=multi-user.target
 EOF
     local service_name
-service_name=$(basename "${MONITOR_SERVICE_FILE}")
-
+    service_name=$(basename "${MONITOR_SERVICE_FILE}")
 
     systemctl daemon-reload
     systemctl enable "${service_name}" --now >/dev/null
@@ -245,6 +261,7 @@ instalar_monitor_cron() {
     log_success "Tarefa cron configurada. O monitor será executado a cada minuto."
     log_warn "Logs serão gravados em /var/log/monitor_nginx.log. Considere configurar a rotação de logs."
 }
+
 
 instalar_monitor() {
     if [[ ${INSTALL_MONITOR_FLAG} -eq 0 && ${AUTO_YES} -eq 0 ]]; then
@@ -296,7 +313,7 @@ detectar_distro_e_configurar() {
         log_error "Não foi possível encontrar o arquivo /etc/os-release para detectar a distro."
         exit 1
     fi
-    
+    export PRETTY_NAME 
     case "${ID_LIKE:-$ID}" in
         debian)
             log_info "Sistema da família Debian detectado."
@@ -440,6 +457,22 @@ EOF
     log_success "Configuração de reinício automático aplicada."
 }
 
+print_usage() {
+    echo "USO:"
+    echo "    sudo $0 [-y] [--install-monitor] [OPÇÕES DE WEBHOOK]"
+    echo ""
+    echo "OPÇÕES:"
+    echo "    -y, --yes               Modo não-interativo (automático)."
+    echo "    --install-monitor       Força a instalação do monitor no modo interativo."
+    echo "    -h, --help              Mostra esta mensagem de ajuda."
+    echo ""
+    echo "OPÇÕES DE WEBHOOK:"
+    echo "    --discord-webhook \"URL\""
+    echo "    --slack-webhook \"URL\""
+    echo "    --telegram-token \"TOKEN\""
+    echo "    --telegram-chat-id \"ID\""
+}
+
 main() {
     verificar_root
 
@@ -459,20 +492,40 @@ main() {
                 exit 0
                 ;;
             --discord-webhook)
-                DISCORD_WEBHOOK_ARG="${2-}"
-                shift 2
+                if [[ -n "${2-}" && ! "$2" =~ ^- ]]; then
+                    DISCORD_WEBHOOK_ARG="$2"
+                    shift 2
+                else
+                    log_error "O argumento '--discord-webhook' requer um valor."
+                    exit 1
+                fi
                 ;;
             --slack-webhook)
-                SLACK_WEBHOOK_ARG="${2-}"
-                shift 2
+                if [[ -n "${2-}" && ! "$2" =~ ^- ]]; then
+                    SLACK_WEBHOOK_ARG="$2"
+                    shift 2
+                else
+                    log_error "O argumento '--slack-webhook' requer um valor."
+                    exit 1
+                fi
                 ;;
             --telegram-token)
-                TELEGRAM_TOKEN_ARG="${2-}"
-                shift 2
+                if [[ -n "${2-}" && ! "$2" =~ ^- ]]; then
+                    TELEGRAM_TOKEN_ARG="$2"
+                    shift 2
+                else
+                    log_error "O argumento '--telegram-token' requer um valor."
+                    exit 1
+                fi
                 ;;
             --telegram-chat-id)
-                TELEGRAM_CHAT_ID_ARG="${2-}"
-                shift 2
+                if [[ -n "${2-}" && ! "$2" =~ ^- ]]; then
+                    TELEGRAM_CHAT_ID_ARG="$2"
+                    shift 2
+                else
+                    log_error "O argumento '--telegram-chat-id' requer um valor."
+                    exit 1
+                fi
                 ;;
             *)
                 log_error "Opção desconhecida: $1"
