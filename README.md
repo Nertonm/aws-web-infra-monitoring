@@ -1,4 +1,113 @@
+# aws-web-infra-monitoring
 
+## Documentação: Implantação e Monitoramento Automatizado de Servidor Web Nginx
+
+Este projeto automatiza a implantação, configuração e o monitoramento contínuo de um servidor web Nginx. É composto por um script de instalação (`instalador_nginx.sh`), um script de monitoramento (`service_status_check.sh`) e um `USERDATA` para provisionamento automático em instâncias AWS EC2.
+
+-----
+
+### 1. Script de Instalação: `instalador_nginx.sh`
+
+**Objetivo:** Automatizar a instalação, configuração e reforço de um servidor Nginx em distribuições Linux baseadas em Debian (Ubuntu) e Red Hat (CentOS, Fedora, Amazon Linux).
+
+#### Principais Funcionalidades
+
+  * **Instalação Inteligente:** Detecta o sistema operacional e utiliza o gerenciador de pacotes apropriado (`apt`, `dnf`, `yum`).
+  * **Modo Flexível:** Pode ser executado em modo **interativo** (pede confirmação) ou **não-interativo** (`-y`), ideal para automação.
+  * **Configuração Automática:**
+      * Configura o firewall (`ufw` ou `firewalld`) para liberar as portas 80 (HTTP) e 22 (SSH).
+      * Cria uma página de teste (`index.html`) personalizada.
+      * Configura o Nginx para reiniciar automaticamente (`Restart=on-failure`) 5 segundos após uma falha via `systemd`.
+  * **Monitoramento Integrado (Opcional):** Instala e configura automaticamente o script `service_status_check.sh` como um serviço (`systemd`) para monitoramento contínuo.
+
+#### Uso e Opções
+
+Execute com `sudo`.
+
+```bash
+sudo ./instalador_nginx.sh [OPÇÕES]
+```
+
+| Opção Curta | Opção Longa | Argumento | Descrição |
+| :--- | :--- | :--- | :--- |
+| `-y` | `--yes` | - | Ativa o modo não-interativo e força a instalação do monitor. |
+| | `--install-monitor` | - | Força a instalação do monitor, mesmo sem `-y`. |
+| | `--discord-webhook` | `"URL"` | Define a URL do webhook do Discord para notificações. |
+| | `--slack-webhook` | `"URL"` | Define a URL do webhook do Slack. |
+| | `--telegram-token` | `"TOKEN"` | Define o token do bot do Telegram. |
+| | `--telegram-chat-id`| `"ID"` | Define o Chat ID do Telegram. |
+| `-h` | `--help` | - | Mostra a mensagem de ajuda. |
+
+**Exemplo (automático com notificação no Discord):**
+
+```bash
+sudo ./instalador_nginx.sh -y --discord-webhook "URL_DO_SEU_WEBHOOK"
+```
+
+-----
+
+### 2. Script de Monitoramento: `service_status_check.sh`
+
+**Objetivo:** Realizar uma verificação de saúde completa de um serviço web, validando o processo, a porta de rede e a resposta HTTP.
+
+#### Principais Funcionalidades
+
+  * **Verificação em Três Níveis:**
+    1.  **Serviço:** Confirma se o serviço está `active` no `systemd`.
+    2.  **Porta:** Valida se a porta TCP especificada está em modo de escuta (`LISTEN`).
+    3.  **HTTP:** Garante que o serviço responde com um código de status funcional (`2xx` ou `3xx`).
+  * **Modo Contínuo:** Executa verificações em loop (`-c`) com intervalo configurável (`-i`).
+  * **Notificações Inteligentes:** Envia alertas de **falha** e **recuperação** para Discord, Slack e Telegram.
+  * **Logging Detalhado:** Registra todas as operações em um arquivo de log (padrão: `/var/log/<serviço>_check.log`) e exibe saídas coloridas no terminal.
+
+#### Configuração de Notificações
+
+As credenciais são carregadas do arquivo `/etc/service_monitor/config.env` ou via variáveis de ambiente.
+
+  * **Discord:** `DISCORD_WEBHOOK_URL="SUA_URL"`
+  * **Slack:** `SLACK_WEBHOOK_URL="SUA_URL"`
+  * **Telegram:** `TELEGRAM_BOT_TOKEN="SEU_TOKEN"` e `TELEGRAM_CHAT_ID="SEU_ID"`
+
+#### Uso e Opções
+
+Execute com `sudo`.
+
+```bash
+sudo ./service_status_check.sh [OPÇÕES]
+```
+
+| Opção Curta | Opção Longa | Argumento | Descrição | Padrão |
+| :--- | :--- | :--- | :--- | :--- |
+| `-s` | `--service` | `<nome>` | Define o nome do serviço a ser verificado no `systemd`. | `nginx` |
+| `-h` | `--host` | `<host>` | Define o host ou endereço IP para o teste HTTP. | `localhost` |
+| `-p` | `--port` | `<porta>` | Define a porta TCP para os testes de rede e HTTP. | `80` |
+| `-l` | `--log-file`| `<path>` | Caminho completo para o arquivo de log. | `/var/log/<serviço>_check.log` |
+| `-c` | `--continuous`| - | Ativa o modo de verificação contínua. | Desativado |
+| `-i` | `--interval` | `<segs>` | Intervalo em segundos entre as verificações no modo contínuo. | `60` |
+| | `--help` | - | Mostra a mensagem de ajuda e sai. | - |
+
+**Exemplo (monitorar o Apache na porta 8080 a cada 5 minutos):**
+
+```bash
+sudo ./service_status_check.sh -s apache2 -p 8080 -c -i 300
+```
+
+-----
+
+### 3\. Automação em Nuvem: `USERDATA` para AWS EC2
+
+**Objetivo:** Script de bootstrap para automatizar a execução do `instalador_nginx.sh` na inicialização de uma nova instância EC2.
+
+#### Funcionamento
+
+1.  Instala o `git`.
+2.  Clona o repositório do projeto.
+3.  Torna o `instalador_nginx.sh` executável.
+4.  Executa o instalador em modo não-interativo (`-y`).
+
+#### Uso e Personalização
+
+Cole o conteúdo do script no campo **"User Data"** ao criar uma instância EC2. Para configurar as notificações desde o início, adicione os argumentos de webhook à última linha.
 
 
 ## Detalhamento por Etapas
@@ -37,7 +146,9 @@
 
 A instalação do Servidor Nginx foi automatizada utilizando um script bash seguindo as seguintes etapas:
 
+
 #### 1. verificar\_root
+
 
 A função inicial garante que o script seja executado com privilégios de superusuário (root), uma condição necessária para instalar pacotes e alterar configurações do sistema.
 
@@ -691,6 +802,7 @@ sudo systemctl start nginx
 ```
 ![alt text](./assets/image-21.png)
 ![alt text](./assets/image-22.png)
+
 Logo após, notificações de **recuperação** foram enviadas, confirmando que o serviço havia voltado a operar normalmente.
 
 Os logs detalhados do monitoramento também puderam ser consultados no arquivo `/var/log/nginx_check.log`.
