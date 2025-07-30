@@ -275,6 +275,12 @@ instalar_monitor() {
     
     configurar_webhooks
     clonar_repositorio
+    
+    if [[ "${PKG_MANAGER}" != "apt-get" ]]; then
+        log_info "Em sistemas da família Red Hat (não-Debian), o monitoramento é configurado exclusivamente com systemd."
+        instalar_monitor_systemd
+        return
+    fi
 
     local ESCOLHA="1" 
     if [[ ${AUTO_YES} -eq 0 ]]; then
@@ -353,10 +359,10 @@ instalar_pacotes() {
     if [[ "$PKG_MANAGER" == "apt-get" ]]; then
         apt-get update -qq
         apt-get install -y -qq "${NGINX_PACKAGE}" git curl iproute2
+        log_success "Nginx, Git, Curl e iproute2 instalados com sucesso."
     else
-        "$PKG_MANAGER" install -y "${NGINX_PACKAGE}" git curl iproute2
+        "$PKG_MANAGER" install -y "${NGINX_PACKAGE}" git
     fi
-    log_success "Nginx, Git, Curl e iproute2 instalados com sucesso."
 }
 
 
