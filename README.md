@@ -8,7 +8,7 @@ Este projeto automatiza a implantação, configuração e o monitoramento contí
 
 ### 1. Script de Instalação: `instalador_nginx.sh`
 
-**Objetivo:** Automatizar a instalação, configuração e reforço de um servidor Nginx em distribuições Linux baseadas em Debian (Ubuntu) e Red Hat (CentOS, Fedora, Amazon Linux).
+**Objetivo:** Automatizar a instalação, configuração e monitoramento de um servidor Nginx em distribuições Linux baseadas em Debian (Ubuntu) e Red Hat (CentOS, Fedora, Amazon Linux).
 
 #### Principais Funcionalidades
 
@@ -201,7 +201,7 @@ detectar_distro_e_configurar() {
 }
 ```
 
-#### 3\. confirmar\_execucao
+#### 3. confirmar\_execucao
 
 Para generalidade dos casos de uso, o script foi adaptado para funcionar tanto de uma forma interativa como não interativa. No caso da interativa, é verificado se o usuário quer confirmar as alterações antes de prosseguir.
 
@@ -226,12 +226,13 @@ confirmar_execucao() {
 }
 ```
 
-#### 4\. instalar\_pacotes
+#### 4. instalar\_pacotes
 
 Essa função se aproveita da variável `PKG_MANAGER`, atribuída na função anterior, para determinar qual gerenciador de pacotes será utilizado para instalar o Nginx e outras dependências como `git`, `curl` e `iproute2`.
 
 ```bash
 instalar_pacotes() {
+
     log_info "Verificando se o Nginx já está instalado..."
     if ( [[ "$PKG_MANAGER" == "apt-get" ]] && dpkg -s "${NGINX_PACKAGE}" &>/dev/null ) || \
        ( [[ "$PKG_MANAGER" != "apt-get" ]] && rpm -q "${NGINX_PACKAGE}" &>/dev/null ); then
@@ -243,14 +244,14 @@ instalar_pacotes() {
     if [[ "$PKG_MANAGER" == "apt-get" ]]; then
         apt-get update -qq
         apt-get install -y -qq "${NGINX_PACKAGE}" git curl iproute2
+        log_success "Nginx, Git, Curl e iproute2 instalados com sucesso."
     else
-        "$PKG_MANAGER" install -y "${NGINX_PACKAGE}" git curl iproute2
+        "$PKG_MANAGER" install -y "${NGINX_PACKAGE}" git
     fi
-    log_success "Nginx, Git, Curl e iproute2 instalados com sucesso."
 }
 ```
 
-#### 5\. configurar\_firewall
+#### 5. configurar\_firewall
 
 Novamente, para ser mais abrangente, a configuração do firewall foi feita para os casos de uso do `UFW` (Debian/Ubuntu) e `firewall-cmd` (Fedora/RHEL). Caso nenhum seja detectado, a etapa é pulada.
 
@@ -287,7 +288,7 @@ configurar_firewall() {
 }
 ```
 
-#### 6\. criar\_pagina\_teste
+#### 6. criar\_pagina\_teste
 
 É criada uma estrutura HTML simples para a página que será exibida pelo Nginx. Caso já exista uma página `index.html`, um backup da versão original é criado.
 
@@ -319,7 +320,7 @@ EOF
 }
 ```
 
-#### 7\. configurar\_restart
+#### 7. configurar\_restart
 
 É criado um `override` para o `systemd`, configurando o serviço do Nginx para que seja reiniciado automaticamente 5 segundos após uma falha.
 
@@ -342,7 +343,7 @@ EOF
 }
 ```
 
-#### 8\. instalar_monitor
+#### 8. instalar_monitor
 
 Esta função orquestra a instalação opcional de um script de monitoramento. Ela clona um repositório Git, configura webhooks para notificações (Discord, Slack, Telegram) e instala o monitor como um serviço `systemd` (recomendado) ou como uma tarefa `cron`.
 
@@ -354,13 +355,19 @@ instalar_monitor() {
             log_info "Instalação do monitor pulada."; return;
         fi
     elif [[ ${INSTALL_MONITOR_FLAG} -eq 0 ]]; then
-        return
+        return 
     fi
     
     configurar_webhooks
     clonar_repositorio
+    
+    if [[ "${PKG_MANAGER}" != "apt-get" ]]; then
+        log_info "Em sistemas da família Red Hat (não-Debian), o monitoramento é configurado exclusivamente com systemd."
+        instalar_monitor_systemd
+        return
+    fi
 
-    local ESCOLHA="1"
+    local ESCOLHA="1" 
     if [[ ${AUTO_YES} -eq 0 ]]; then
         read -p "Como deseja executar o monitor? [1] systemd (recomendado), [2] cron: " -r ESCOLHA
     fi
@@ -373,7 +380,7 @@ instalar_monitor() {
 }
 ```
 
-#### 9\. finalizar\_e\_verificar
+#### 9. finalizar\_e\_verificar
 
 Na etapa final, o script habilita o serviço Nginx para iniciar junto com o sistema, reinicia o serviço para aplicar todas as configurações e, por fim, verifica se ele está ativo. Em caso de sucesso, exibe o endereço de IP local para que o usuário possa acessar a página de teste no navegador.
 
@@ -796,7 +803,7 @@ sudo systemctl stop nginx
 Foram recebidas notificações de erro no Discord e Telegram, informando que o serviço havia parado, que a porta não estava mais escutando e que o servidor não respondia a requisições HTTP.
 
 
-Reiniciando o serviço
+**Reiniciando o serviço**
 ```bash
 sudo systemctl start nginx
 ```
